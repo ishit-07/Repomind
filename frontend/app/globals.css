@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: #020617; /* slate-950 */
+  --color-foreground: #e2e8f0; /* slate-200 */
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+}

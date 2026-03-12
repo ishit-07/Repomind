@@ -1,0 +1,52 @@
+[
+  {
+    "id": "TC001",
+    "title": "post api ingest with valid repourl",
+    "description": "Test the POST /api/ingest endpoint with a valid repoUrl in the request body. Verify that the response status is 200 and the JSON response contains filesProcessed, chunksCreated, and status fields indicating successful ingestion."
+  },
+  {
+    "id": "TC002",
+    "title": "post api ingest with missing repourl",
+    "description": "Test the POST /api/ingest endpoint with an empty request body or missing repoUrl. Verify that the response status is 400 Bad Request and the JSON response contains an error message indicating that repoUrl is required."
+  },
+  {
+    "id": "TC003",
+    "title": "post api ingest with github rate limit reached",
+    "description": "Test the POST /api/ingest endpoint with a repoUrl that triggers GitHub rate limiting. Verify that the response status is 429 Too Many Requests and the JSON response contains an error message about GitHub rate limit reached."
+  },
+  {
+    "id": "TC004",
+    "title": "post api chat with valid question and repourl",
+    "description": "Test the POST /api/chat endpoint with a valid repoUrl and question in the request body. Verify that the response status is 200 and an SSE stream is opened that emits multiple data events with partial model tokens and a final done event containing the assembled answer and cited chunk references."
+  },
+  {
+    "id": "TC005",
+    "title": "post api chat with non ingested repo",
+    "description": "Test the POST /api/chat endpoint with a repoUrl that has not been ingested. Verify that the response status is 404 Not Found and the JSON response contains an error message indicating no embeddings found and ingestion is required."
+  },
+  {
+    "id": "TC006",
+    "title": "post api chat with missing question",
+    "description": "Test the POST /api/chat endpoint with a missing or empty question field in the request body. Verify that the response status is 400 Bad Request and the JSON response contains an error message indicating that question is required."
+  },
+  {
+    "id": "TC007",
+    "title": "get api suggestions with valid repourl",
+    "description": "Test the GET /api/suggestions endpoint with a valid repoUrl query parameter. Verify that the response status is 200 and the JSON response contains a suggestions array with starter onboarding questions or exploration prompts."
+  },
+  {
+    "id": "TC008",
+    "title": "get api summary with valid repourl",
+    "description": "Test the GET /api/summary endpoint with a valid repoUrl query parameter. Verify that the response status is 200 and the JSON response contains a summary field with an AI-generated concise overview of the repository."
+  },
+  {
+    "id": "TC009",
+    "title": "get api structure with valid repourl",
+    "description": "Test the GET /api/structure endpoint with a valid repoUrl query parameter. Verify that the response status is 200 and the JSON response contains nodes, edges, tree, and insights fields representing the AST-based dependency graph and file tree."
+  },
+  {
+    "id": "TC010",
+    "title": "get api file with valid repourl and filepath",
+    "description": "Test the GET /api/file endpoint with valid repoUrl and filePath query parameters. Verify that the response status is 200 and the JSON response contains the repoUrl, filePath, and content fields with the raw source content of the specified file."
+  }
+]

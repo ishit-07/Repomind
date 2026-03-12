@@ -1,0 +1,77 @@
+version: "2"
+type: backend
+tech_stack:
+  - JavaScript
+  - Express
+  - MongoDB
+  - Google Gemini AI
+features:
+  - name: Repository Ingestion
+    description: Fetch, chunk, embed and store a GitHub repo
+    files:
+      - src/routes/api.js
+      - src/services/github.js
+      - src/services/gemini.js
+    endpoints:
+      - method: POST
+        path: /api/ingest
+        description: Fetches contents from GitHub repo, chunks text, generates embeddings and saves to MongoDB.
+        auth_required: false
+        request_schema:
+          body:
+            repoUrl: string
+  - name: Streaming Chat
+    description: Streaming SSE chat over repository documents
+    files:
+      - src/routes/api.js
+      - src/services/rag.js
+    endpoints:
+      - method: POST
+        path: /api/chat
+        description: RAG based streaming chat using Gemini
+        auth_required: false
+        request_schema:
+          body:
+            repoUrl: string
+            question: string
+            history: array
+  - name: Repo Suggestions
+    description: Generate starter questions for a repo
+    files:
+      - src/routes/api.js
+      - src/services/rag.js
+    endpoints:
+      - method: GET
+        path: /api/suggestions
+        description: Returns AI generated suggestions for a chat
+        auth_required: false
+  - name: Repo Summary
+    description: Generate an AI overview of the repo
+    files:
+      - src/routes/api.js
+      - src/services/rag.js
+    endpoints:
+      - method: GET
+        path: /api/summary
+        description: Returns AI generated summary of repo
+        auth_required: false
+  - name: Repo Structure
+    description: AST-based dependency graph and file tree
+    files:
+      - src/routes/api.js
+      - src/services/dependencyParser.js
+    endpoints:
+      - method: GET
+        path: /api/structure
+        description: Returns dependency graph
+        auth_required: false
+  - name: Repo File Retrieval
+    description: Return raw file content
+    files:
+      - src/routes/api.js
+    endpoints:
+      - method: GET
+        path: /api/file
+        description: Returns source code of a file
+        auth_required: false
+known_limitations: []

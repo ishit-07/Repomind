@@ -1,23 +1,16 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Github, Loader2, GitBranch, Terminal, Sparkles, RotateCcw, MessageSquare } from 'lucide-react';
+import { Send, Github, Loader2, GitBranch, Terminal, Sparkles, RotateCcw, MessageSquare, Network, ExternalLink } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import DependencyGraph from './components/DependencyGraph';
+import FileTreeView from './components/FileTreeView';
+import MermaidDiagram from './components/MermaidDiagram';
 
 const BACKEND_URL = 'http://localhost:5000';
 
-// Markdown renderer: handles code blocks, inline code, bold, italic, newlines
-function renderMarkdown(text) {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-            `<pre class="code-block"><code class="lang-${lang}">${code.trim()}</code></pre>`)
-        .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/\n/g, '<br/>');
-}
+
 
 function StreamingCursor() {
     return <span className="streaming-cursor" aria-hidden="true" />;
@@ -37,6 +30,12 @@ export default function Home() {
     const [messages, setMessages] = useState([]);
     const [suggestions, setSuggestions] = useState([]);
     const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
+
+    // Structure View State
+    const [activeTab, setActiveTab] = useState('chat'); // 'chat' | 'structure'
+    const [structureData, setStructureData] = useState(null);
+    const [isFetchingStructure, setIsFetchingStructure] = useState(false);
+    const [selectedFileNode, setSelectedFileNode] = useState(null);
 
     const messagesEndRef = useRef(null);
     const inputRef = useRef(null);
@@ -148,8 +147,9 @@ export default function Home() {
                 setIsStreaming(false);
             }
 
-            // Step 3: Fetch suggestions in background
+            // Step 3: Fetch suggestions and structure in background
             fetchSuggestions(repoUrl);
+            fetchStructureData(repoUrl);
         } catch (err) {
             setMessages([{ role: 'assistant', content: `**Error:** ${err.message}`, streaming: false }]);
             setIngestionComplete(true);
@@ -169,6 +169,21 @@ export default function Home() {
             setSuggestions([]);
         } finally {
             setIsFetchingSuggestions(false);
+        }
+    };
+
+    // ── Structure Data ─────────────────────────────────────────────────────────
+    const fetchStructureData = async (url) => {
+        setIsFetchingStructure(true);
+        try {
+            const res = await fetch(`${BACKEND_URL}/api/structure?repoUrl=${encodeURIComponent(url)}`);
+            if (!res.ok) throw new Error('Structure fetch failed');
+            const data = await res.json();
+            setStructureData(data);
+        } catch (_) {
+            setStructureData(null);
+        } finally {
+            setIsFetchingStructure(false);
         }
     };
 
@@ -362,7 +377,6 @@ export default function Home() {
 
                 {/* ── Chat Panel ── */}
                 <section className="lg:col-span-8 flex flex-col bg-slate-900/80 border border-white/[0.06] rounded-2xl shadow-xl overflow-hidden">
-
                     {!ingestionComplete ? (
                         /* Empty state */
                         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
@@ -378,110 +392,202 @@ export default function Home() {
                         </div>
                     ) : (
                         <>
-                            {/* Messages */}
-                            <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-4">
-                                {messages.map((m, idx) => {
-                                    // Skip the empty streaming placeholder — typing dots handle this state
-                                    if (m.role === 'assistant' && m.streaming && !m.content) return null;
-                                    return (
-                                        <div key={idx} className={`flex items-start gap-2.5 message-appear ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                            {m.role === 'assistant' && (
-                                                <div className="w-7 h-7 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0 mt-0.5 shadow-md shadow-indigo-500/20">
-                                                    <Terminal className="w-3.5 h-3.5 text-white" />
-                                                </div>
-                                            )}
-                                            <div className={`max-w-[84%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${m.role === 'user'
-                                                ? 'bg-gradient-to-br from-indigo-600 to-violet-700 text-white rounded-tr-sm shadow-lg shadow-indigo-800/20'
-                                                : 'bg-slate-800/80 text-slate-200 border border-white/[0.06] rounded-tl-sm'
-                                                }`}>
-                                                {m.role === 'assistant' ? (
-                                                    <>
-                                                        <div className="break-words" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content || '') }} />
-                                                        {m.streaming && <StreamingCursor />}
-                                                    </>
-                                                ) : (
-                                                    <p className="break-words whitespace-pre-wrap">{m.content}</p>
-                                                )}
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-
-                                {/* Typing dots when streaming starts */}
-                                {isStreaming && messages[messages.length - 1]?.content === '' && (
-                                    <div className="flex items-start gap-2.5 justify-start">
-                                        <div className="w-7 h-7 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0 shadow-md shadow-indigo-500/20">
-                                            <Terminal className="w-3.5 h-3.5 text-white" />
-                                        </div>
-                                        <div className="bg-slate-800/80 border border-white/[0.06] rounded-2xl rounded-tl-sm px-4 py-3.5 flex items-center gap-1.5">
-                                            {[0, 120, 240].map(d => (
-                                                <span key={d} className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: `${d}ms` }} />
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                                <div ref={messagesEndRef} />
+                            {/* Tab Switcher */}
+                            <div className="flex border-b border-white/[0.06]">
+                                <button
+                                    onClick={() => setActiveTab('chat')}
+                                    className={`flex-1 py-3 text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${activeTab === 'chat' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-indigo-500/5' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+                                >
+                                    <MessageSquare className="w-4 h-4" />
+                                    Chat View
+                                </button>
+                                <button
+                                    onClick={() => setActiveTab('structure')}
+                                    className={`flex-1 py-3 text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${activeTab === 'structure' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-indigo-500/5' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+                                >
+                                    <Network className="w-4 h-4" />
+                                    Structure View
+                                </button>
                             </div>
 
-                            {/* ── Suggestion Cards ── */}
-                            {(isFetchingSuggestions || suggestions.length > 0) && !isStreaming && (
-                                <div className="px-4 pt-3 pb-2 border-t border-white/[0.06]">
-                                    <div className="flex items-center gap-1.5 mb-2.5">
-                                        <Sparkles className="w-3 h-3 text-violet-400" />
-                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Try asking</span>
-                                    </div>
+                            {/* ── Chat View ── */}
+                            <div className={`flex flex-col flex-1 h-0 overflow-hidden ${activeTab === 'chat' ? 'flex' : 'hidden'}`}>
+                                {/* Messages */}
+                                <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-4">
+                                    {messages.map((m, idx) => {
+                                        if (m.role === 'assistant' && m.streaming && !m.content) return null;
+                                        return (
+                                            <div key={idx} className={`flex items-start gap-2.5 message-appear ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                                {m.role === 'assistant' && (
+                                                    <div className="w-7 h-7 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0 mt-0.5 shadow-md shadow-indigo-500/20">
+                                                        <Terminal className="w-3.5 h-3.5 text-white" />
+                                                    </div>
+                                                )}
+                                                <div className={`max-w-[84%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${m.role === 'user'
+                                                    ? 'bg-gradient-to-br from-indigo-600 to-violet-700 text-white rounded-tr-sm shadow-lg shadow-indigo-800/20'
+                                                    : 'bg-slate-800/80 text-slate-200 border border-white/[0.06] rounded-tl-sm'
+                                                }`}>
+                                                    {m.role === 'assistant' ? (
+                                                        <>
+                                                            <div className="break-words markdown-body prose prose-invert max-w-none prose-pre:my-0 prose-pre:bg-transparent prose-pre:p-0 text-sm">
+                                                                <ReactMarkdown
+                                                                    remarkPlugins={[remarkGfm]}
+                                                                    components={{
+                                                                        code({ node, inline, className, children, ...props }) {
+                                                                            const match = /language-(\w+)/.exec(className || '');
+                                                                            const codeString = String(children).replace(/\n$/, '');
+                                                                            
+                                                                            if (!inline && match && match[1] === 'mermaid') {
+                                                                                return <MermaidDiagram chart={codeString} />;
+                                                                            }
+                                                                            
+                                                                            if (!inline && match) {
+                                                                                return (
+                                                                                    <pre className="code-block">
+                                                                                        <code className={`lang-${match[1]}`} {...props}>
+                                                                                            {children}
+                                                                                        </code>
+                                                                                    </pre>
+                                                                                );
+                                                                            }
+                                                                            
+                                                                            return (
+                                                                                <code className={inline ? "inline-code" : ""} {...props}>
+                                                                                    {children}
+                                                                                </code>
+                                                                            );
+                                                                        }
+                                                                    }}
+                                                                >
+                                                                    {m.content || ''}
+                                                                </ReactMarkdown>
+                                                            </div>
+                                                            {m.streaming && <StreamingCursor />}
+                                                        </>
+                                                    ) : (
+                                                        <p className="break-words whitespace-pre-wrap">{m.content}</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
 
-                                    {isFetchingSuggestions ? (
-                                        <div className="grid grid-cols-2 gap-2">
-                                            {[...Array(4)].map((_, i) => (
-                                                <div key={i} className="h-14 rounded-2xl bg-slate-800/50 border border-white/5 animate-pulse" />
-                                            ))}
-                                        </div>
-                                    ) : (
-                                        <div className="grid grid-cols-2 gap-2">
-                                            {suggestions.slice(0, 4).map((s, i) => (
-                                                <button
-                                                    key={i}
-                                                    onClick={() => sendMessage(s)}
-                                                    className="suggestion-card group"
-                                                >
-                                                    <span className="text-base mb-1 block">{CHIP_ICONS[i]}</span>
-                                                    <p className="text-xs text-slate-300 group-hover:text-white leading-snug line-clamp-2 transition-colors">
-                                                        {s}
-                                                    </p>
-                                                </button>
-                                            ))}
+                                    {/* Typing dots when streaming starts */}
+                                    {isStreaming && messages[messages.length - 1]?.content === '' && (
+                                        <div className="flex items-start gap-2.5 justify-start">
+                                            <div className="w-7 h-7 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0 shadow-md shadow-indigo-500/20">
+                                                <Terminal className="w-3.5 h-3.5 text-white" />
+                                            </div>
+                                            <div className="bg-slate-800/80 border border-white/[0.06] rounded-2xl rounded-tl-sm px-4 py-3.5 flex items-center gap-1.5">
+                                                {[0, 120, 240].map(d => (
+                                                    <span key={d} className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: `${d}ms` }} />
+                                                ))}
+                                            </div>
                                         </div>
                                     )}
+                                    <div ref={messagesEndRef} />
                                 </div>
-                            )}
 
-                            {/* ── Chat Input ── */}
-                            <div className="px-4 py-3 border-t border-white/[0.06]">
-                                <form onSubmit={handleChat} className="relative flex items-center">
-                                    <input
-                                        ref={inputRef}
-                                        type="text"
-                                        value={question}
-                                        onChange={(e) => setQuestion(e.target.value)}
-                                        placeholder={isStreaming ? 'AI is responding…' : 'Ask about the codebase…'}
-                                        disabled={isStreaming}
-                                        className="w-full bg-slate-950 border border-white/10 rounded-2xl pl-5 pr-14 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all text-white placeholder:text-slate-500 disabled:opacity-60"
-                                    />
-                                    <button
-                                        type="submit"
-                                        disabled={!question.trim() || isStreaming}
-                                        className="absolute right-2 bg-gradient-to-br from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all shadow-md shadow-indigo-500/20"
-                                    >
-                                        <Send className="w-4 h-4" />
-                                    </button>
-                                </form>
-                                <p className="text-[10px] text-slate-600 mt-1.5 text-center">Powered by Gemini · answers based on the ingested codebase.</p>
+                                {/* Suggestion Cards */}
+                                {(isFetchingSuggestions || suggestions.length > 0) && !isStreaming && (
+                                    <div className="px-4 pt-3 pb-2 border-t border-white/[0.06]">
+                                        <div className="flex items-center gap-1.5 mb-2.5">
+                                            <Sparkles className="w-3 h-3 text-violet-400" />
+                                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Try asking</span>
+                                        </div>
+
+                                        {isFetchingSuggestions ? (
+                                            <div className="grid grid-cols-2 gap-2">
+                                                {[...Array(4)].map((_, i) => (
+                                                    <div key={i} className="h-14 rounded-2xl bg-slate-800/50 border border-white/5 animate-pulse" />
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="grid grid-cols-2 gap-2">
+                                                {suggestions.slice(0, 4).map((s, i) => (
+                                                    <button
+                                                        key={i}
+                                                        onClick={() => sendMessage(s)}
+                                                        className="suggestion-card group"
+                                                    >
+                                                        <span className="text-base mb-1 block">{CHIP_ICONS[i]}</span>
+                                                        <p className="text-xs text-slate-300 group-hover:text-white leading-snug line-clamp-2 transition-colors">
+                                                            {s}
+                                                        </p>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Chat Input */}
+                                <div className="px-4 py-3 border-t border-white/[0.06]">
+                                    <form onSubmit={handleChat} className="relative flex items-center">
+                                        <input
+                                            ref={inputRef}
+                                            type="text"
+                                            value={question}
+                                            onChange={(e) => setQuestion(e.target.value)}
+                                            placeholder={isStreaming ? 'AI is responding…' : 'Ask about the codebase…'}
+                                            disabled={isStreaming}
+                                            className="w-full bg-slate-950 border border-white/10 rounded-2xl pl-5 pr-14 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all text-white placeholder:text-slate-500 disabled:opacity-60"
+                                        />
+                                        <button
+                                            type="submit"
+                                            disabled={!question.trim() || isStreaming}
+                                            className="absolute right-2 bg-gradient-to-br from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all shadow-md shadow-indigo-500/20"
+                                        >
+                                            <Send className="w-4 h-4" />
+                                        </button>
+                                    </form>
+                                    <p className="text-[10px] text-slate-600 mt-1.5 text-center">Powered by Gemini · answers based on the ingested codebase.</p>
+                                </div>
+                            </div>
+
+                            {/* ── Structure View ── */}
+                            <div className={`flex flex-1 h-0 overflow-hidden ${activeTab === 'structure' ? 'flex' : 'hidden'}`}>
+                                {isFetchingStructure ? (
+                                    <div className="flex-1 flex flex-col items-center justify-center gap-3">
+                                        <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
+                                        <p className="text-sm text-slate-400">Parsing AST and building dependency graph...</p>
+                                    </div>
+                                ) : structureData ? (
+                                    <>
+                                        {/* Left Sidebar: File Tree */}
+                                        <div className="w-64 flex-shrink-0 h-full border-r border-white/[0.06] bg-slate-900/40">
+                                            <FileTreeView 
+                                                treeData={structureData.tree} 
+                                                onSelectNode={setSelectedFileNode} 
+                                                selectedNodeId={selectedFileNode}
+                                            />
+                                        </div>
+                                        {/* Right Main: React Flow Graph */}
+                                        <div className="flex-1 h-full relative">
+                                            <a
+                                                href={`/structure?repoUrl=${encodeURIComponent(repoUrl)}`}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="absolute top-4 right-4 z-10 flex items-center gap-2 px-3 py-1.5 bg-slate-800/80 hover:bg-slate-700/80 text-slate-200 text-xs font-medium rounded-lg border border-white/10 transition-colors backdrop-blur-md shadow-lg"
+                                            >
+                                                Open Full View <ExternalLink className="w-3.5 h-3.5" />
+                                            </a>
+                                            <DependencyGraph 
+                                                structureData={structureData} 
+                                                onNodeClick={setSelectedFileNode}
+                                            />
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="flex-1 flex items-center justify-center">
+                                        <p className="text-sm text-red-400">Failed to load repository structure.</p>
+                                    </div>
+                                )}
                             </div>
                         </>
                     )}
                 </section>
-            </main>
-        </div>
-    );
+    </main>
+</div>
+);
 }

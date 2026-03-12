@@ -4,6 +4,8 @@ import { chunkText } from '../utils/chunk.js';
 import { generateEmbedding } from '../services/gemini.js';
 import { streamAnswer, generateSuggestions, generateSummary } from '../services/rag.js';
 import { RepoDocument } from '../models/RepoDocument.js';
+import { RepoFile } from '../models/RepoFile.js';
+import { buildDependencyGraph } from '../services/dependencyParser.js';
 
 const router = express.Router();
 
@@ -20,10 +22,18 @@ router.post('/ingest', async (req, res) => {
     try {
         const files = await processRepository(repoUrl);
         await RepoDocument.deleteMany({ repoUrl });
+        await RepoFile.deleteMany({ repoUrl });
 
         let totalChunks = 0;
 
         for (const file of files) {
+            // Store the full, un-chunked file for AST dependency parsing
+            await new RepoFile({
+                repoUrl,
+                filePath: file.path,
+                content: file.content
+            }).save();
+
             const chunks = chunkText(file.content);
 
             for (let i = 0; i < chunks.length; i++) {
@@ -110,6 +120,39 @@ router.get('/summary', async (req, res) => {
     } catch (error) {
         console.error('Summary failed:', error);
         res.status(500).json({ summary: null });
+    }
+});
+
+// GET /api/structure?repoUrl=... — return AST-based dependency graph and file tree
+router.get('/structure', async (req, res) => {
+    const { repoUrl } = req.query;
+    if (!repoUrl) return res.status(400).json({ error: 'repoUrl is required' });
+
+    try {
+        const structure = await buildDependencyGraph(repoUrl);
+        res.json(structure);
+    } catch (error) {
+        console.error('Structure building failed:', error);
+        res.status(500).json({ error: 'Failed to build dependency graph: ' + error.message });
+    }
+});
+// GET /api/file?repoUrl=...&filePath=... — return raw file content
+router.get('/file', async (req, res) => {
+    const { repoUrl, filePath } = req.query;
+    if (!repoUrl || !filePath) return res.status(400).json({ error: 'repoUrl and filePath are required' });
+
+    try {
+        const file = await RepoFile.findOne({ repoUrl, filePath });
+        if (!file) return res.status(404).json({ error: 'File not found in ingested repository' });
+
+        res.json({
+            repoUrl,
+            filePath: file.filePath,
+            content: file.content
+        });
+    } catch (error) {
+        console.error('File fetch failed:', error);
+        res.status(500).json({ error: 'Failed to fetch file: ' + error.message });
     }
 });
 

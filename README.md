@@ -145,7 +145,7 @@ The **Structure View** uses `@xyflow/react` to render a force-directed graph of 
 
 ---
 
-## 🤝 Contributing
+<!-- ## 🤝 Contributing
 
 Contributions are welcome! Whether it's adding support for new languages, improving the RAG precision, or enhancing the UI/UX.
 
@@ -163,4 +163,4 @@ Contributions are welcome! Whether it's adding support for new languages, improv
 - [ ] Local codebase indexing (CLI tool).
 - [ ] Integration with private repositories (OAuth).
 - [ ] Exportable architecture reports (PDF/Markdown).
-
+ -->

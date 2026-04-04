@@ -85,3 +85,8 @@ yarn-error.log*
 
 # vercel
 .vercel
+
+# TestSprite
+.testsprite/
+testsprite_tests/
+

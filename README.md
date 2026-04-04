@@ -2,7 +2,9 @@
 
 **RepoMind** is an AI-powered codebase assistant that allows you to ingest any public GitHub repository and interact with it using natural language. It combines Retrieval-Augmented Generation (RAG) with AST-based code analysis to provide a deep understanding of your codebase.
 
-![RepoMind Screenshot](https://github.com/user-attachments/assets/ca71ff76-8cc0-4927-995f-97216a6953de)
+![RepoMind Home](assets/screenshots/repomind_home.png)
+![RepoMind Analysis & Structure](assets/screenshots/repomind_analysis.png)
+
 
 ## ✨ Features
 

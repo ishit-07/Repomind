@@ -64,14 +64,38 @@ export async function fetchFileContent(owner, repo, path) {
 }
 
 /**
- * Process a repository: fetch tree, filter files, fetch contents.
- * Returns an array of objects: { path, content }
+ * Fetches the latest commit SHA for a repository's default branch.
  */
-export async function processRepository(repoUrl) {
+export async function fetchRepoCommitSha(owner, repo) {
+    try {
+        const repoInfoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`);
+        if (!repoInfoRes.ok) return null;
+        const repoInfo = await repoInfoRes.json();
+        const defaultBranch = repoInfo.default_branch;
+
+        const commitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${defaultBranch}`);
+        if (!commitRes.ok) return null;
+        const commitData = await commitRes.json();
+        return commitData.sha;
+    } catch (e) {
+        console.warn("Could not fetch commit SHA", e);
+        return null;
+    }
+}
+
+/**
+ * Process a repository: fetch tree, filter files, fetch contents.
+ * Uses Promise.all with batched concurrency to download faster.
+ * Returns { commitSha, downloadedFiles: [{ path, content }] }
+ */
+export async function processRepository(repoUrl, onProgress = null) {
     const repoInfo = getRepoInfoFromUrl(repoUrl);
     if (!repoInfo) throw new Error('Invalid GitHub URL');
 
     const { owner, repo } = repoInfo;
+
+    console.log(`Fetching commit SHA for ${owner}/${repo}...`);
+    const commitSha = await fetchRepoCommitSha(owner, repo) || Date.now().toString(); // Fallback if fails
 
     // Get all files in the repo
     console.log(`Fetching tree for ${owner}/${repo}...`);
@@ -83,17 +107,25 @@ export async function processRepository(repoUrl) {
     });
 
     console.log(`Found ${filesToProcess.length} valid files to process.`);
+    if (onProgress) onProgress({ type: 'found_files', total: filesToProcess.length });
 
     const downloadedFiles = [];
+    const BATCH_SIZE = 15;
+    let processedCount = 0;
 
-    // MVP approach: fetch files sequentially or in small batches to avoid rate limits
-    for (const fileItem of filesToProcess) {
-        console.log(`Downloading: ${fileItem.path}`);
-        const content = await fetchFileContent(owner, repo, fileItem.path);
-        if (content !== null) {
-            downloadedFiles.push({ path: fileItem.path, content });
-        }
+    for (let i = 0; i < filesToProcess.length; i += BATCH_SIZE) {
+        const batch = filesToProcess.slice(i, i + BATCH_SIZE);
+        const promises = batch.map(async (fileItem) => {
+            const content = await fetchFileContent(owner, repo, fileItem.path);
+            if (content !== null) {
+                downloadedFiles.push({ path: fileItem.path, content });
+            }
+            processedCount++;
+            if (onProgress) onProgress({ type: 'download_progress', current: processedCount, total: filesToProcess.length });
+        });
+
+        await Promise.all(promises);
     }
 
-    return downloadedFiles;
+    return { commitSha, downloadedFiles };
 }

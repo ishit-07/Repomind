@@ -9,6 +9,8 @@ import { buildDependencyGraph } from '../services/dependencyParser.js';
 
 const router = express.Router();
 
+import { RepoMeta } from '../models/RepoMeta.js';
+
 // POST /api/ingest — fetch, chunk, embed and store a GitHub repo
 router.post('/ingest', async (req, res) => {
     const { repoUrl } = req.body;
@@ -19,52 +21,116 @@ router.post('/ingest', async (req, res) => {
 
     console.log(`Starting ingestion for: ${repoUrl}`);
 
+    // Set headers for SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const sendEvent = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+
     try {
-        const files = await processRepository(repoUrl);
+        sendEvent({ status: 'fetching_github', message: 'Checking repository...' });
+
+        // Step 1: Process Repo and Check Cache
+        const { commitSha, downloadedFiles } = await processRepository(repoUrl, (progress) => {
+            if (progress.type === 'download_progress') {
+                sendEvent({ status: 'fetching_github', progress: progress.current, total: progress.total, message: `Downloading files (${progress.current}/${progress.total})` });
+            }
+        });
+
+        const cachedMeta = await RepoMeta.findOne({ repoUrl, commitSha, status: 'complete' });
+        if (cachedMeta) {
+            console.log(`Cache hit for ${repoUrl} at ${commitSha}`);
+            
+            const filesProcessed = await RepoFile.countDocuments({ repoUrl });
+            const chunksCreated = await RepoDocument.countDocuments({ repoUrl });
+
+            sendEvent({ status: 'graph_ready', data: cachedMeta.graphData });
+            sendEvent({ status: 'suggestions_ready', data: cachedMeta.suggestions });
+            sendEvent({ status: 'complete', message: 'Loaded from cache', filesProcessed, chunksCreated });
+            return res.end();
+        }
+
+        // Setup Meta for new ingest
+        await RepoMeta.deleteMany({ repoUrl });
+        const meta = new RepoMeta({ repoUrl, commitSha, status: 'pending' });
+        await meta.save();
+
         await RepoDocument.deleteMany({ repoUrl });
         await RepoFile.deleteMany({ repoUrl });
 
-        let totalChunks = 0;
+        // Save raw files for AST
+        sendEvent({ status: 'parsing_ast', message: 'Saving files and building dependency graph...' });
+        for (const file of downloadedFiles) {
+            await new RepoFile({ repoUrl, filePath: file.path, content: file.content }).save();
+        }
 
-        for (const file of files) {
-            // Store the full, un-chunked file for AST dependency parsing
-            await new RepoFile({
-                repoUrl,
-                filePath: file.path,
-                content: file.content
-            }).save();
+        // Step 2: Build Dependency Graph (before embeddings!)
+        const graphData = await buildDependencyGraph(repoUrl);
+        meta.graphData = graphData;
+        await meta.save();
+        sendEvent({ status: 'graph_ready', data: graphData });
 
+        // Step 3: Chunk & Embed Concurrently
+        let allChunks = [];
+        for (const file of downloadedFiles) {
             const chunks = chunkText(file.content);
-
             for (let i = 0; i < chunks.length; i++) {
-                const chunkContent = chunks[i];
+                allChunks.push({ file, chunkContent: chunks[i], index: i });
+            }
+        }
+
+        sendEvent({ status: 'embedding', progress: 0, total: allChunks.length, message: `Generating embeddings (0/${allChunks.length})` });
+
+        const BATCH_SIZE = 10;
+        let processedChunks = 0;
+        let successChunks = 0;
+
+        for (let i = 0; i < allChunks.length; i += BATCH_SIZE) {
+            const batch = allChunks.slice(i, i + BATCH_SIZE);
+            const promises = batch.map(async ({ file, chunkContent, index }) => {
                 try {
                     const embedding = await generateEmbedding(chunkContent);
                     const doc = new RepoDocument({
                         repoUrl,
                         filePath: file.path,
                         content: chunkContent,
-                        chunkIndex: i,
+                        chunkIndex: index,
                         embedding
                     });
                     await doc.save();
-                    totalChunks++;
-                } catch (embeddingError) {
-                    console.error(`Failed to embed chunk ${i} of ${file.path}`, embeddingError);
+                    successChunks++;
+                } catch (err) {
+                    console.error(`Failed to embed chunk ${index} of ${file.path}`, err);
                 }
-            }
+                processedChunks++;
+                if (processedChunks % 5 === 0 || processedChunks === allChunks.length) {
+                    sendEvent({ status: 'embedding', progress: processedChunks, total: allChunks.length, message: `Generating embeddings (${processedChunks}/${allChunks.length})` });
+                }
+            });
+
+            await Promise.all(promises);
         }
 
-        res.json({
-            message: 'Ingestion complete',
-            filesProcessed: files.length,
-            chunksCreated: totalChunks,
-            repoUrl
-        });
+        // Step 4: Generate Suggestions
+        sendEvent({ status: 'generating_suggestions', message: 'Analyzing code for suggestions...' });
+        const suggestions = await generateSuggestions(repoUrl);
+        meta.suggestions = suggestions;
+        
+        sendEvent({ status: 'suggestions_ready', data: suggestions });
+
+        // Complete
+        meta.status = 'complete';
+        await meta.save();
+        sendEvent({ status: 'complete', message: 'Ingestion successful', filesProcessed: downloadedFiles.length, chunksCreated: successChunks });
+        res.end();
 
     } catch (error) {
         console.error('Ingestion failed:', error);
-        res.status(500).json({ error: 'Ingestion failed: ' + error.message });
+        sendEvent({ status: 'error', error: error.message });
+        res.end();
     }
 });
 

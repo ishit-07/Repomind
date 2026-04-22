@@ -9,11 +9,13 @@ import {
     Panel,
     MarkerType,
     useReactFlow,
-    ReactFlowProvider
+    ReactFlowProvider,
+    Handle,
+    Position
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
-import { FileCode2, FileJson, FileImage, FileText, AlertTriangle, X, Loader2 } from 'lucide-react';
+import { FileCode2, FileJson, FileImage, FileText, AlertTriangle, X, Loader2, Network } from 'lucide-react';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
 
@@ -60,24 +62,37 @@ const FileNode = ({ data }) => {
     let iconColor = 'text-slate-400';
     let borderColor = 'border-slate-700';
 
-    if (data.extension === 'js' || data.extension === 'ts' || data.extension === 'jsx' || data.extension === 'tsx') {
-        Icon = FileCode2;
-        iconColor = 'text-yellow-400';
-        borderColor = 'border-yellow-900/50';
-    } else if (data.extension === 'json') {
+    if (data.extension === 'api') {
+        Icon = Network;
+        iconColor = 'text-gray-400';
+        borderColor = 'border-gray-700 border-dashed';
+    } else if (data.folder && data.folder.includes('api')) {
         Icon = FileJson;
         iconColor = 'text-green-400';
         borderColor = 'border-green-900/50';
+    } else if (data.folder && data.folder.includes('services')) {
+        Icon = Network;
+        iconColor = 'text-amber-400';
+        borderColor = 'border-amber-900/50';
+    } else if (data.extension === 'js' || data.extension === 'ts' || data.extension === 'jsx' || data.extension === 'tsx') {
+        Icon = FileCode2;
+        iconColor = 'text-blue-400';
+        borderColor = 'border-blue-900/50';
     }
 
     return (
-        <div className={`px-3 py-2 shadow-lg rounded-xl bg-slate-900 border ${data.isCircular ? 'border-red-500 shadow-red-900/20' : borderColor} flex items-center gap-2 min-w-[200px] max-w-[250px]`}>
+        <div 
+            className={`px-3 py-2 shadow-lg rounded-xl bg-slate-900 border ${data.isCircular ? 'border-red-500 shadow-red-900/20' : borderColor} flex items-center gap-2 min-w-[200px] max-w-[250px] transition-all hover:ring-2 hover:ring-indigo-500/50`}
+            title={`Incoming: ${data.incoming || 0} | Outgoing: ${data.outgoing || 0}`}
+        >
+            <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
+            <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
             <Icon className={`w-5 h-5 flex-shrink-0 ${data.isCircular ? 'text-red-500' : iconColor}`} />
             <div className="flex flex-col min-w-0">
                 <div className="text-xs font-semibold text-slate-200 truncate" title={data.label}>{data.label}</div>
                 <div className="text-[9px] text-slate-500 truncate" title={data.folder}>{data.folder || '/'}</div>
             </div>
-            {data.isCircular && <AlertTriangle className="w-4 h-4 text-red-500 ml-auto flex-shrink-0" />}
+            {data.isCircular && <AlertTriangle className="w-4 h-4 text-red-500 ml-auto flex-shrink-0" title="Circular Dependency Detected" />}
         </div>
     );
 };
@@ -94,17 +109,48 @@ function DependencyGraphInner({ structureData, onNodeClick }) {
     const [filePreview, setFilePreview] = useState(null);
     const [isPreviewLoading, setIsPreviewLoading] = useState(false);
 
-    useEffect(() => {
-        if (!structureData || !structureData.nodes || structureData.nodes.length === 0) return;
+    // Filters
+    const [filter, setFilter] = useState('all'); // all, frontend, backend, services
 
-        // Apply dagre layout mechanism
+    const applyLayout = useCallback((data, currentFilter) => {
+        if (!data || !data.nodes || data.nodes.length === 0) return;
+
+        let filteredNodes = data.nodes;
+        
+        if (currentFilter === 'backend') {
+            filteredNodes = data.nodes.filter(n => n.data.folder && n.data.folder.includes('api'));
+        } else if (currentFilter === 'frontend') {
+            filteredNodes = data.nodes.filter(n => !n.data.folder || (!n.data.folder.includes('api') && !n.data.folder.includes('services')));
+        } else if (currentFilter === 'services') {
+            filteredNodes = data.nodes.filter(n => n.data.folder && n.data.folder.includes('services'));
+        }
+
+        const filteredNodeIds = new Set(filteredNodes.map(n => n.id));
+        const filteredEdges = data.edges.filter(e => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target));
+
+        // Calculate incoming/outgoing for tooltips
+        const incoming = {};
+        const outgoing = {};
+        filteredEdges.forEach(e => {
+            outgoing[e.source] = (outgoing[e.source] || 0) + 1;
+            incoming[e.target] = (incoming[e.target] || 0) + 1;
+        });
+
+        filteredNodes = filteredNodes.map(n => ({
+            ...n,
+            data: {
+                ...n.data,
+                incoming: incoming[n.id] || 0,
+                outgoing: outgoing[n.id] || 0
+            }
+        }));
+
         const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-            structureData.nodes,
-            structureData.edges,
-            'LR' // Left to Right flow usually looks better for dependencies
+            filteredNodes,
+            filteredEdges,
+            'LR'
         );
 
-        // Format edges with markers
         const formattedEdges = layoutedEdges.map(e => ({
             ...e,
             markerEnd: {
@@ -113,16 +159,20 @@ function DependencyGraphInner({ structureData, onNodeClick }) {
                 height: 15,
                 color: e.style?.stroke || '#6366f1',
             },
+            type: e.style?.strokeDasharray ? 'straight' : 'default',
         }));
 
         setNodes(layoutedNodes);
         setEdges(formattedEdges);
 
-        // Defer fitView briefly so ReactFlow can render first
         window.setTimeout(() => {
             fitView({ padding: 0.2, duration: 800 });
         }, 50);
-    }, [structureData, setNodes, setEdges, fitView]);
+    }, [setNodes, setEdges, fitView]);
+
+    useEffect(() => {
+        applyLayout(structureData, filter);
+    }, [structureData, filter, applyLayout]);
 
     const handleNodeClick = useCallback(async (event, node) => {
         if (onNodeClick) onNodeClick(node.id);
@@ -150,7 +200,7 @@ function DependencyGraphInner({ structureData, onNodeClick }) {
         }));
 
         // Fetch File Content
-        if (structureData?.repoUrl && node.id) {
+        if (structureData?.repoUrl && node.id && node.data.extension !== 'api') {
             setIsPreviewLoading(true);
             try {
                 const res = await fetch(`${BACKEND_URL}/api/file?repoUrl=${encodeURIComponent(structureData.repoUrl)}&filePath=${encodeURIComponent(node.id)}`);
@@ -165,6 +215,8 @@ function DependencyGraphInner({ structureData, onNodeClick }) {
             } finally {
                 setIsPreviewLoading(false);
             }
+        } else {
+            setFilePreview('// Internal API Route Edge - No physical file mapped.');
         }
     }, [onNodeClick, setNodes, setEdges, structureData]);
 
@@ -210,14 +262,33 @@ function DependencyGraphInner({ structureData, onNodeClick }) {
                 className="bg-slate-900 border-slate-800" 
             />
             
-            <Panel position="top-right" className={`bg-slate-900/80 backdrop-blur border border-white/10 p-3 rounded-xl m-4 transition-all duration-300 ${selectedNodeData ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
-                <div className="text-xs font-medium text-slate-300 mb-2">Graph Legend</div>
-                <div className="flex flex-col gap-1.5 text-[10px] text-slate-400">
-                    <div className="flex items-center gap-2"><div className="w-3 h-3 bg-yellow-400 rounded-sm"></div> JS/TS Files</div>
-                    <div className="flex items-center gap-2"><div className="w-3 h-3 bg-green-400 rounded-sm"></div> JSON Files</div>
-                    <div className="flex items-center gap-2 mt-1"><div className="w-3 h-0.5 bg-indigo-500"></div> Imports/Depends On</div>
-                    <div className="flex items-center gap-2 text-red-400"><AlertTriangle className="w-3 h-3" /> Circular Dependency</div>
-                    <div className="mt-2 text-indigo-300 opacity-80 italic">Click a node to view impact</div>
+            <Panel position="top-right" className="flex flex-col gap-3 m-4 z-10 pointer-events-auto">
+                {/* Filter Toolbar */}
+                <div className={`bg-slate-900/80 backdrop-blur border border-white/10 p-2 rounded-xl transition-all duration-300 ${selectedNodeData ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
+                    <div className="flex bg-slate-950/50 rounded-lg p-1">
+                        {['all', 'frontend', 'backend', 'services'].map(f => (
+                            <button
+                                key={f}
+                                onClick={() => setFilter(f)}
+                                className={`px-3 py-1 text-[10px] font-semibold uppercase tracking-wider rounded-md transition-colors ${filter === f ? 'bg-indigo-500 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+                            >
+                                {f}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                <div className={`bg-slate-900/80 backdrop-blur border border-white/10 p-3 rounded-xl transition-all duration-300 ${selectedNodeData ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
+                    <div className="text-xs font-medium text-slate-300 mb-2">Graph Legend</div>
+                    <div className="flex flex-col gap-1.5 text-[10px] text-slate-400">
+                        <div className="flex items-center gap-2"><div className="w-3 h-3 bg-blue-400 rounded-sm"></div> Frontend / React</div>
+                        <div className="flex items-center gap-2"><div className="w-3 h-3 bg-green-400 rounded-sm"></div> Backend / API</div>
+                        <div className="flex items-center gap-2"><div className="w-3 h-3 bg-amber-400 rounded-sm"></div> Services</div>
+                        <div className="flex items-center gap-2 mt-1"><div className="w-3 h-0.5 bg-indigo-500"></div> Imports/Depends On</div>
+                        <div className="flex items-center gap-2"><div className="w-3 h-0.5 border-t border-dashed border-gray-400"></div> API Call</div>
+                        <div className="flex items-center gap-2 text-red-400"><AlertTriangle className="w-3 h-3" /> Circular Dependency</div>
+                        <div className="mt-2 text-indigo-300 opacity-80 italic">Hover for connection count</div>
+                    </div>
                 </div>
             </Panel>
 

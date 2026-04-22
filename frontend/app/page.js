@@ -7,6 +7,8 @@ import remarkGfm from 'remark-gfm';
 import DependencyGraph from './components/DependencyGraph';
 import FileTreeView from './components/FileTreeView';
 import MermaidDiagram from './components/MermaidDiagram';
+import LoadingStatus from './components/LoadingStatus';
+import ThinkingIndicator from './components/ThinkingIndicator';
 
 const BACKEND_URL = 'http://localhost:5000';
 
@@ -74,11 +76,18 @@ export default function Home() {
                 try {
                     const parsed = JSON.parse(payload);
                     if (parsed.error) throw new Error(parsed.error);
+                    if (parsed.progress) {
+                        setMessages(prev => {
+                            const copy = [...prev];
+                            copy[copy.length - 1] = { ...copy[copy.length - 1], progressMsg: parsed.progress };
+                            return copy;
+                        });
+                    }
                     if (parsed.token) {
                         fullText += parsed.token;
                         setMessages(prev => {
                             const copy = [...prev];
-                            copy[copy.length - 1] = { role: 'assistant', content: fullText, streaming: true };
+                            copy[copy.length - 1] = { ...copy[copy.length - 1], content: fullText, streaming: true };
                             return copy;
                         });
                     }
@@ -96,6 +105,8 @@ export default function Home() {
         return fullText;
     }, []);
 
+    const [ingestionProgress, setIngestionProgress] = useState(null); // { message, progress, total }
+
     // ── Ingestion + Summary ────────────────────────────────────────────────────
     const handleIngest = async (e) => {
         e.preventDefault();
@@ -104,21 +115,79 @@ export default function Home() {
         setIsIngesting(true);
         setIngestionComplete(false);
         setIngestionData(null);
+        setIngestionProgress(null);
         setMessages([]);
         setSuggestions([]);
+        setStructureData(null);
 
         try {
-            // Step 1: Ingest
+            // Step 1: Ingest via SSE Pipeline
             const res = await fetch(`${BACKEND_URL}/api/ingest`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ repoUrl }),
             });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Ingestion failed');
 
-            setIngestionData(data);
+            if (!res.ok) throw new Error('Ingestion connection failed');
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let finalData = null;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // Keep incomplete line
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const payload = line.slice(6).trim();
+                    if (!payload) continue;
+
+                    try {
+                        const event = JSON.parse(payload);
+                        
+                        if (event.status === 'error') {
+                            throw new Error(event.error);
+                        }
+
+                        if (event.message) {
+                            setIngestionProgress({
+                                message: event.message,
+                                progress: event.progress,
+                                total: event.total
+                            });
+                        }
+
+                        if (event.status === 'graph_ready') {
+                            setStructureData(event.data);
+                        }
+
+                        if (event.status === 'suggestions_ready') {
+                            setSuggestions(event.data || []);
+                        }
+
+                        if (event.status === 'complete') {
+                            finalData = {
+                                filesProcessed: event.filesProcessed,
+                                chunksCreated: event.chunksCreated
+                            };
+                            // Let the loop finish to break naturally
+                        }
+                    } catch (e) {
+                        // ignore malformed JSON or handled throws
+                        if (e.message !== 'Unexpected end of JSON input') throw e;
+                    }
+                }
+            }
+
+            setIngestionData(finalData);
             setIngestionComplete(true);
+            setIngestionProgress(null);
 
             // Step 2: Stream summary as first AI message
             setMessages([{ role: 'assistant', content: '', streaming: true }]);
@@ -140,19 +209,17 @@ export default function Home() {
                 // Fallback if summary fails
                 setMessages([{
                     role: 'assistant',
-                    content: `Repository **${repoUrl.split('/').slice(-1)[0]}** ingested successfully — ${data.filesProcessed} files, ${data.chunksCreated} embeddings. Ask me anything about the code!`,
+                    content: `Repository **${repoUrl.split('/').slice(-1)[0]}** ingested successfully. Ask me anything about the code!`,
                     streaming: false,
                 }]);
             } finally {
                 setIsStreaming(false);
             }
 
-            // Step 3: Fetch suggestions and structure in background
-            fetchSuggestions(repoUrl);
-            fetchStructureData(repoUrl);
         } catch (err) {
             setMessages([{ role: 'assistant', content: `**Error:** ${err.message}`, streaming: false }]);
             setIngestionComplete(true);
+            setIngestionProgress(null);
         } finally {
             setIsIngesting(false);
         }
@@ -291,6 +358,18 @@ export default function Home() {
                 }
                 .no-scrollbar::-webkit-scrollbar { display: none; }
                 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+                
+                @keyframes shimmer {
+                    0% { transform: translateX(-100%); }
+                    100% { transform: translateX(100%); }
+                }
+                .animate-shimmer {
+                    animation: shimmer 2s infinite linear;
+                }
+                .shimmer-animation {
+                    animation: shimmer 3s infinite linear;
+                    background-size: 200% 100%;
+                }
             `}</style>
 
             {/* Header */}
@@ -352,11 +431,17 @@ export default function Home() {
                             </button>
                         </form>
 
-                        {ingestionComplete && ingestionData && (
+                        {isIngesting && (
+                            <div className="mt-4 pt-4 border-t border-white/[0.06]">
+                                <LoadingStatus ingestionProgress={ingestionProgress} />
+                            </div>
+                        )}
+
+                        {ingestionComplete && ingestionData && !isIngesting && (
                             <div className="mt-4 pt-4 border-t border-white/[0.06]">
                                 <div className="bg-emerald-500/[0.08] border border-emerald-500/20 rounded-xl p-4">
                                     <div className="flex items-center gap-2 mb-3">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                                         <span className="text-emerald-400 text-xs font-semibold uppercase tracking-widest">Analysis Complete</span>
                                     </div>
                                     <div className="grid grid-cols-2 gap-2">
@@ -474,16 +559,7 @@ export default function Home() {
 
                                     {/* Typing dots when streaming starts */}
                                     {isStreaming && messages[messages.length - 1]?.content === '' && (
-                                        <div className="flex items-start gap-2.5 justify-start">
-                                            <div className="w-7 h-7 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0 shadow-md shadow-indigo-500/20">
-                                                <Terminal className="w-3.5 h-3.5 text-white" />
-                                            </div>
-                                            <div className="bg-slate-800/80 border border-white/[0.06] rounded-2xl rounded-tl-sm px-4 py-3.5 flex items-center gap-1.5">
-                                                {[0, 120, 240].map(d => (
-                                                    <span key={d} className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: `${d}ms` }} />
-                                                ))}
-                                            </div>
-                                        </div>
+                                        <ThinkingIndicator backendProgress={messages[messages.length - 1]?.progressMsg} />
                                     )}
                                     <div ref={messagesEndRef} />
                                 </div>

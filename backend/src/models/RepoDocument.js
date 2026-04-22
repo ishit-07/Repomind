@@ -8,6 +8,8 @@ const repoDocumentSchema = new mongoose.Schema({
     embedding: { type: [Number], required: true }
 }, { timestamps: true });
 
+// Note: Mongoose `index: true` above creates a standard index on repoUrl.
+
 // Defining the vector search index configuration in Atlas:
 // Name: vector_index
 // Type: vectorSearch

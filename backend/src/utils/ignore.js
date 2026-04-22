@@ -15,6 +15,8 @@ export const IGNORE_LIST = [
     'pnpm-lock.yaml',
     'bun.lockb',
     '.DS_Store',
+    // Test files and docs
+    '.test.js', '.spec.js', '.test.ts', '.spec.ts', '.test.jsx', '.spec.jsx', '.test.tsx', '.spec.tsx', '.md',
     // Common binary/asset extensions
     '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.pdf', '.zip', '.tar.gz', '.mp3', '.mp4', '.ttf', '.woff', '.woff2'
 ];

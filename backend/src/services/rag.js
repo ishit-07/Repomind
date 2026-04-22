@@ -1,11 +1,72 @@
 import dotenv from 'dotenv';
 import { RepoDocument } from '../models/RepoDocument.js';
 import { generateEmbedding } from './gemini.js';
+
 dotenv.config();
 
+// ==========================================
+// CONSTANTS & CONFIGURATION
+// ==========================================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GENERATE_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-const STREAM_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
+const GENERATE_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+const STREAM_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
+
+// Retry Configuration
+const RETRY_DELAYS = [1000, 2000, 4000]; // 1s, 2s, 4s delays for exponential backoff
+const MAX_RETRIES = 3;
+
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
+
+/**
+ * Helper: Delay execution for a given number of milliseconds
+ */
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Helper: Fetch wrapper with exponential backoff for temporary/503 errors.
+ * 
+ * @param {Function} fetchFn - A function that returns a fetch Promise
+ * @param {Function} [onRetry] - Optional callback triggered on retry
+ * @returns {Promise<Response>} - Resolves with the fetch response
+ */
+async function fetchWithRetry(fetchFn, onRetry = null) {
+    let lastError = null;
+    
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const response = await fetchFn();
+            
+            // If the response is successful, return it immediately
+            if (response.ok) return response;
+            
+            // If we receive a 503 (Service Unavailable) or 429 (Too Many Requests)
+            if (response.status === 503 || response.status === 429) {
+                if (attempt < MAX_RETRIES) {
+                    if (onRetry) onRetry(attempt + 1);
+                    await delay(RETRY_DELAYS[attempt]);
+                    continue; // Try again
+                }
+            }
+            
+            // For other HTTP errors or if max retries exceeded, return the response
+            return response;
+            
+        } catch (error) {
+            // This catches network errors
+            lastError = error;
+            if (attempt < MAX_RETRIES) {
+                if (onRetry) onRetry(attempt + 1);
+                await delay(RETRY_DELAYS[attempt]);
+                continue;
+            }
+            break; // Max retries exceeded
+        }
+    }
+    
+    throw lastError;
+}
 
 /**
  * Compute cosine similarity between two vectors.
@@ -19,6 +80,42 @@ function cosineSimilarity(a, b) {
     }
     return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
+
+/**
+ * Build the Gemini `contents` array from code context + chat history.
+ * Supports multi-turn conversation by including previous messages.
+ */
+function buildContents(contextString, chatHistory, currentQuestion, repoUrl) {
+    const systemPrompt = `You are RepoMind, an expert AI developer assistant helping a user explore a specific GitHub repository.
+
+Repository URL: ${repoUrl}
+
+Your behaviour rules:
+1. For questions about the CODE (architecture, functions, files, logic, dependencies): answer using the provided code context below. Reference specific file names when relevant.
+2. For questions about code flow, architecture diagrams, or workflows (e.g., "what is the login flow?" or "how does x communicate with y?"): ALWAYS provide a Mermaid.js flowchart or sequence diagram to visualize it. Wrap the diagram in a \`\`\`mermaid code block.
+3. For general developer questions (how to clone, how to install, how to run, git commands, etc.): answer helpfully using the repo URL above and common developer knowledge — you don't need the code context for these.
+4. Never hallucinate file names, functions, or code that are not in the context.
+5. Always format code examples in markdown code blocks with the correct language (e.g. \`\`\`bash, \`\`\`js).
+6. Be concise and direct. Developers prefer short, accurate answers.
+
+${contextString}`;
+
+    const contents = [
+        { role: 'user', parts: [{ text: systemPrompt }] },
+        { role: 'model', parts: [{ text: 'Understood. I have read the codebase context and I am ready to help. What would you like to know?' }] },
+        ...chatHistory.map(msg => ({
+            role: msg.role === 'user' ? 'user' : 'model',
+            parts: [{ text: msg.content }]
+        })),
+        { role: 'user', parts: [{ text: currentQuestion }] }
+    ];
+
+    return contents;
+}
+
+// ==========================================
+// EXPORTED SERVICES
+// ==========================================
 
 /**
  * Find the most relevant code chunks using in-memory cosine similarity.
@@ -42,176 +139,164 @@ export async function findRelevantChunks(repoUrl, queryEmbedding, limit = 8) {
 }
 
 /**
- * Build the Gemini `contents` array from code context + chat history.
- * Supports multi-turn conversation by including previous messages.
- */
-function buildContents(contextString, chatHistory, currentQuestion, repoUrl) {
-    const systemPrompt = `You are RepoMind, an expert AI developer assistant helping a user explore a specific GitHub repository.
-
-Repository URL: ${repoUrl}
-
-Your behaviour rules:
-1. For questions about the CODE (architecture, functions, files, logic, dependencies): answer using the provided code context below. Reference specific file names when relevant.
-2. For questions about code flow, architecture diagrams, or workflows (e.g., "what is the login flow?" or "how does x communicate with y?"): ALWAYS provide a Mermaid.js flowchart or sequence diagram to visualize it. Wrap the diagram in a \`\`\`mermaid code block.
-3. For general developer questions (how to clone, how to install, how to run, git commands, etc.): answer helpfully using the repo URL above and common developer knowledge — you don't need the code context for these.
-4. Never hallucinate file names, functions, or code that are not in the context.
-5. Always format code examples in markdown code blocks with the correct language (e.g. \`\`\`bash, \`\`\`js).
-6. Be concise and direct. Developers prefer short, accurate answers.
-
-${contextString}`;
-
-    const contents = [
-        // First turn: inject the system context as a user message
-        { role: 'user', parts: [{ text: systemPrompt }] },
-        { role: 'model', parts: [{ text: 'Understood. I have read the codebase context and I am ready to help. What would you like to know?' }] },
-        // Replay the existing chat history
-        ...chatHistory.map(msg => ({
-            role: msg.role === 'user' ? 'user' : 'model',
-            parts: [{ text: msg.content }]
-        })),
-        // Current question
-        { role: 'user', parts: [{ text: currentQuestion }] }
-    ];
-
-    return contents;
-}
-
-/**
  * Stream the AI answer token by token, writing SSE chunks to the Express response.
- * @param {string} repoUrl
- * @param {string} question
- * @param {Array} chatHistory - previous messages [{role, content}]
- * @param {import('express').Response} res - Express response to stream to
+ * Includes retries, progress tracking, and fallback handling.
  */
 export async function streamAnswer(repoUrl, question, chatHistory, res) {
-    // 1. Convert question to embedding
-    const questionEmbedding = await generateEmbedding(question);
+    try {
+        // Send initial progress message
+        res.write(`data: ${JSON.stringify({ progress: "Searching files..." })}\n\n`);
 
-    // 2. Find relevant code chunks
-    const chunks = await findRelevantChunks(repoUrl, questionEmbedding, 8);
+        // 1. Convert question to embedding
+        const questionEmbedding = await generateEmbedding(question);
 
-    let contextString = '';
-    if (chunks.length === 0) {
-        contextString = 'No relevant code chunks found. Tell the user to make sure the repository has been ingested.';
-    } else {
-        contextString = "Here are the most relevant code snippets from the repository:\n\n";
-        chunks.forEach(chunk => {
-            contextString += `--- File: ${chunk.filePath} ---\n${chunk.content}\n\n`;
-        });
-    }
+        // 2. Find relevant code chunks
+        const chunks = await findRelevantChunks(repoUrl, questionEmbedding, 8);
 
-    // 3. Build multi-turn contents
-    const contents = buildContents(contextString, chatHistory, question, repoUrl);
-
-    // 4. Stream from Gemini
-    const geminiRes = await fetch(STREAM_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents }),
-    });
-
-    if (!geminiRes.ok) {
-        const err = await geminiRes.json();
-        throw new Error(JSON.stringify(err));
-    }
-
-    // 5. Pipe SSE chunks to the client
-    const reader = geminiRes.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep incomplete line in buffer
-
-        for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const jsonStr = line.slice(6).trim();
-            if (jsonStr === '[DONE]') continue;
-            try {
-                const parsed = JSON.parse(jsonStr);
-                const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (text) {
-                    // Send each token as a simple SSE event
-                    res.write(`data: ${JSON.stringify({ token: text })}\n\n`);
-                }
-            } catch (_) { /* skip malformed chunks */ }
+        let contextString = '';
+        if (chunks.length === 0) {
+            contextString = 'No relevant code chunks found. Tell the user to make sure the repository has been ingested.';
+        } else {
+            contextString = "Here are the most relevant code snippets from the repository:\n\n";
+            chunks.forEach(chunk => {
+                contextString += `--- File: ${chunk.filePath} ---\n${chunk.content}\n\n`;
+            });
         }
-    }
 
-    res.write('data: [DONE]\n\n');
-    res.end();
+        // 3. Build multi-turn contents
+        const contents = buildContents(contextString, chatHistory, question, repoUrl);
+
+        // Update progress
+        res.write(`data: ${JSON.stringify({ progress: "Thinking..." })}\n\n`);
+
+        // 4. Stream from Gemini with Retry Logic
+        const fetchFn = () => fetch(STREAM_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents }),
+        });
+
+        const onRetry = (attempt) => {
+            res.write(`data: ${JSON.stringify({ progress: "Retrying AI request..." })}\n\n`);
+            console.log(`streamAnswer retry attempt ${attempt} for repo ${repoUrl}`);
+        };
+
+        const geminiRes = await fetchWithRetry(fetchFn, onRetry);
+
+        if (!geminiRes.ok) {
+            const err = await geminiRes.text();
+            throw new Error(`Gemini API returned status: ${geminiRes.status}. Details: ${err}`);
+        }
+
+        // 5. Pipe SSE chunks to the client
+        const reader = geminiRes.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep incomplete line in buffer
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const jsonStr = line.slice(6).trim();
+                if (jsonStr === '[DONE]') continue;
+                try {
+                    const parsed = JSON.parse(jsonStr);
+                    const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (text) {
+                        res.write(`data: ${JSON.stringify({ token: text })}\n\n`);
+                    }
+                } catch (_) { /* skip malformed chunks */ }
+            }
+        }
+
+        res.write('data: [DONE]\n\n');
+        res.end();
+
+    } catch (error) {
+        console.error("streamAnswer error:", error);
+        // If all retries fail, send graceful SSE message
+        res.write(`data: ${JSON.stringify({ token: "AI service is busy right now. Please try again shortly." })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+    }
 }
 
 /**
  * Generate 4 suggested starter questions based on the repository files.
+ * Employs safe failure and retry handling.
  */
 export async function generateSuggestions(repoUrl) {
-    // Sample up to 5 files to give the model context
-    const docs = await RepoDocument.find({ repoUrl }, { filePath: 1, content: 1 }).limit(5).lean();
-
-    if (docs.length === 0) return [];
-
-    const sampleContext = docs.map(d => `File: ${d.filePath}\n${d.content.slice(0, 300)}`).join('\n\n');
-
-    const prompt = `Based on the following code from a GitHub repository, generate exactly 4 concise, interesting questions a developer might ask about this codebase. Return ONLY a JSON array of 4 strings, no other text.
-
-${sampleContext}
-
-Return format: ["question 1", "question 2", "question 3", "question 4"]`;
-
-    const response = await fetch(GENERATE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.7 }
-        }),
-    });
-
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
-
     try {
-        // Extract JSON array from the response text
-        const match = raw.match(/\[[\s\S]*\]/);
-        if (match) return JSON.parse(match[0]);
-    } catch (_) { }
+        const docs = await RepoDocument.find({ repoUrl }, { filePath: 1, content: 1 }).limit(5).lean();
 
-    return [];
+        if (docs.length === 0) return [];
+
+        const sampleContext = docs.map(d => `File: ${d.filePath}\n${d.content.slice(0, 300)}`).join('\n\n');
+
+        const prompt = `Based on the following code from a GitHub repository, generate exactly 4 concise, interesting questions a developer might ask about this codebase. Return ONLY a JSON array of 4 strings, no other text.\n\n${sampleContext}\n\nReturn format: ["question 1", "question 2", "question 3", "question 4"]`;
+
+        const fetchFn = () => fetch(GENERATE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.7 }
+            }),
+        });
+
+        const response = await fetchWithRetry(fetchFn, (attempt) => {
+            console.log(`generateSuggestions retry attempt ${attempt}`);
+        });
+
+        if (!response.ok) return [];
+
+        const data = await response.json();
+        const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+
+        try {
+            const match = raw.match(/\[[\s\S]*\]/);
+            if (match) return JSON.parse(match[0]);
+        } catch (_) { }
+
+        return [];
+    } catch (error) {
+        console.error("generateSuggestions error:", error);
+        return []; // Never crash the app
+    }
 }
+
 /**
  * Generate an AI summary of the repository to show as the first chat message.
+ * Employs safe failure and retry handling.
  */
 export async function generateSummary(repoUrl) {
-    // Sample a spread of files for context (README first if available)
-    const docs = await RepoDocument.find(
-        { repoUrl },
-        { filePath: 1, content: 1 }
-    ).limit(12).lean();
+    try {
+        const docs = await RepoDocument.find(
+            { repoUrl },
+            { filePath: 1, content: 1 }
+        ).limit(12).lean();
 
-    if (docs.length === 0) return null;
+        if (docs.length === 0) return null;
 
-    // Sort so README/package.json come first
-    docs.sort((a, b) => {
-        const priority = (p) => {
-            if (/readme/i.test(p)) return 0;
-            if (/package\.json/.test(p)) return 1;
-            if (/index\.[jt]s/.test(p)) return 2;
-            return 3;
-        };
-        return priority(a.filePath) - priority(b.filePath);
-    });
+        docs.sort((a, b) => {
+            const priority = (p) => {
+                if (/readme/i.test(p)) return 0;
+                if (/package\.json/.test(p)) return 1;
+                if (/index\.[jt]s/.test(p)) return 2;
+                return 3;
+            };
+            return priority(a.filePath) - priority(b.filePath);
+        });
 
-    const context = docs.map(d => `File: ${d.filePath}\n${d.content.slice(0, 400)}`).join('\n\n---\n\n');
+        const context = docs.map(d => `File: ${d.filePath}\n${d.content.slice(0, 400)}`).join('\n\n---\n\n');
 
-    const prompt = `You are RepoMind, analyzing a GitHub repository. Based on the following code and files, write a concise, developer-friendly summary of this repository.
+        const prompt = `You are RepoMind, analyzing a GitHub repository. Based on the following code and files, write a concise, developer-friendly summary of this repository.
 
 Include:
 - What the project does (1-2 sentences)
@@ -224,17 +309,25 @@ Keep it under 200 words. Use markdown formatting. Be direct and specific — no 
 Repository files:
 ${context}`;
 
-    const response = await fetch(GENERATE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3, maxOutputTokens: 400 }
-        }),
-    });
+        const fetchFn = () => fetch(GENERATE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.3, maxOutputTokens: 400 }
+            }),
+        });
 
-    if (!response.ok) return null;
+        const response = await fetchWithRetry(fetchFn, (attempt) => {
+            console.log(`generateSummary retry attempt ${attempt}`);
+        });
 
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    } catch (error) {
+        console.error("generateSummary error:", error);
+        return null; // Never crash the app
+    }
 }

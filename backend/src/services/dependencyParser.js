@@ -56,6 +56,7 @@ function resolveImportPath(importPath, currentFilePath, allFilePaths) {
  */
 function extractDependencies(content, currentFilePath) {
     const deps = new Set();
+    const apiCalls = new Set();
     
     try {
         const ast = parse(content, {
@@ -81,28 +82,49 @@ function extractDependencies(content, currentFilePath) {
                 }
             },
             CallExpression(path) {
+                const callee = path.node.callee;
+
                 // handle require('...')
-                if (path.node.callee.name === 'require' && path.node.arguments.length > 0) {
+                if (callee.type === 'Identifier' && callee.name === 'require' && path.node.arguments.length > 0) {
                     const arg = path.node.arguments[0];
                     if (arg.type === 'StringLiteral') {
                         deps.add(arg.value);
                     }
                 }
                 // handle dynamic import('...')
-                if (path.node.callee.type === 'Import' && path.node.arguments.length > 0) {
+                if (callee.type === 'Import' && path.node.arguments.length > 0) {
                     const arg = path.node.arguments[0];
                     if (arg.type === 'StringLiteral') {
                         deps.add(arg.value);
                     }
                 }
+
+                // handle API calls
+                let isApiCall = false;
+                let urlArg = null;
+
+                if (callee.type === 'Identifier' && ['fetch', 'useSWR', 'useQuery'].includes(callee.name)) {
+                    isApiCall = true;
+                    urlArg = path.node.arguments[0];
+                } else if (callee.type === 'MemberExpression') {
+                    if (callee.object.type === 'Identifier' && callee.object.name === 'axios' && 
+                        callee.property.type === 'Identifier' && ['get', 'post', 'put', 'delete'].includes(callee.property.name)) {
+                        isApiCall = true;
+                        urlArg = path.node.arguments[0];
+                    }
+                }
+
+                if (isApiCall && urlArg && urlArg.type === 'StringLiteral') {
+                    // Only track if it looks like an internal API call or we just want to show external ones too
+                    apiCalls.add(urlArg.value);
+                }
             }
         });
     } catch (e) {
         // Babel parse error (might not be JS/TS code)
-        // console.warn(`Could not parse AST for ${currentFilePath}: ${e.message}`);
     }
 
-    return Array.from(deps);
+    return { imports: Array.from(deps), apiCalls: Array.from(apiCalls) };
 }
 
 // DFS approach to find circular dependencies in the graph
@@ -226,9 +248,9 @@ export async function buildDependencyGraph(repoUrl) {
         // Only parse JS/TS files
         if (!/\.(js|jsx|ts|tsx|mjs)$/.test(file.filePath)) continue;
 
-        const rawDeps = extractDependencies(file.content, file.filePath);
+        const { imports, apiCalls } = extractDependencies(file.content, file.filePath);
         
-        for (const rawDep of rawDeps) {
+        for (const rawDep of imports) {
             if (isBareModule(rawDep)) continue; // ignore "react", "express" etc.
             
             const resolvedTarget = resolveImportPath(rawDep, file.filePath, allFilePathsSet);
@@ -245,6 +267,38 @@ export async function buildDependencyGraph(repoUrl) {
                         target: resolvedTarget,
                         animated: true,
                         style: { stroke: '#6366f1' } // indigo-500 default
+                    });
+                }
+            }
+        }
+
+        for (const rawApi of apiCalls) {
+            // Check if it's an internal API route (starts with /api/)
+            if (rawApi.startsWith('/api/')) {
+                const apiNodeId = `API: ${rawApi}`;
+                if (!allFilePathsSet.has(apiNodeId)) {
+                    allFilePathsSet.add(apiNodeId);
+                    nodes.push({
+                        id: apiNodeId,
+                        type: 'file',
+                        data: {
+                            label: rawApi,
+                            filePath: apiNodeId,
+                            folder: 'API Routes',
+                            extension: 'api'
+                        }
+                    });
+                }
+                
+                const edgeId = `${file.filePath}->${apiNodeId}`;
+                if (!edgeSet.has(edgeId)) {
+                    edgeSet.add(edgeId);
+                    edges.push({
+                        id: edgeId,
+                        source: file.filePath,
+                        target: apiNodeId,
+                        animated: true,
+                        style: { strokeDasharray: '5,5', stroke: '#94a3b8' } // dashed gray for API calls
                     });
                 }
             }
